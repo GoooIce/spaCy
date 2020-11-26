@@ -17,6 +17,7 @@ cdef class Tokenizer:
     cpdef readonly Vocab vocab
 
     cdef object _token_match
+    cdef object _url_match
     cdef object _prefix_search
     cdef object _suffix_search
     cdef object _infix_finditer
@@ -24,8 +25,6 @@ cdef class Tokenizer:
     cdef PhraseMatcher _special_matcher
     cdef int _property_init_count
     cdef int _property_init_max
-
-    cpdef Doc tokens_from_list(self, list strings)
 
     cdef Doc _tokenize_affixes(self, unicode string, bint with_special_cases)
     cdef int _apply_special_cases(self, Doc doc) except -1
@@ -35,9 +34,9 @@ cdef class Tokenizer:
                                        vector[SpanC] &filtered)
     cdef int _retokenize_special_spans(self, Doc doc, TokenC* tokens,
                                        object span_data)
-    cdef int _try_cache(self, hash_t key, Doc tokens) except -1
-    cdef int _try_specials(self, hash_t key, Doc tokens,
-                           int* has_special) except -1
+    cdef int _try_specials_and_cache(self, hash_t key, Doc tokens,
+                                     int* has_special,
+                                     bint with_special_cases) except -1
     cdef int _tokenize(self, Doc tokens, unicode span, hash_t key,
                        int* has_special, bint with_special_cases) except -1
     cdef unicode _split_affixes(self, Pool mem, unicode string,

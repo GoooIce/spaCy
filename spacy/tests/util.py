@@ -1,11 +1,10 @@
 import numpy
 import tempfile
-import shutil
 import contextlib
 import srsly
-from pathlib import Path
-from spacy.tokens import Doc, Span
-from spacy.attrs import POS, HEAD, DEP
+from spacy.tokens import Doc
+from spacy.vocab import Vocab
+from spacy.util import make_tempdir  # noqa: F401
 
 
 @contextlib.contextmanager
@@ -15,38 +14,24 @@ def make_tempfile(mode="r"):
     f.close()
 
 
-@contextlib.contextmanager
-def make_tempdir():
-    d = Path(tempfile.mkdtemp())
-    yield d
-    shutil.rmtree(str(d))
+def get_batch(batch_size):
+    vocab = Vocab()
+    docs = []
+    start = 0
+    for size in range(1, batch_size + 1):
+        # Make the words numbers, so that they're distinct
+        # across the batch, and easy to track.
+        numbers = [str(i) for i in range(start, start + size)]
+        docs.append(Doc(vocab, words=numbers))
+        start += size
+    return docs
 
 
-def get_doc(vocab, words=[], pos=None, heads=None, deps=None, tags=None, ents=None):
-    """Create Doc object from given vocab, words and annotations."""
-    pos = pos or [""] * len(words)
-    tags = tags or [""] * len(words)
-    heads = heads or [0] * len(words)
-    deps = deps or [""] * len(words)
-    for value in deps + tags + pos:
-        vocab.strings.add(value)
-
-    doc = Doc(vocab, words=words)
-    attrs = doc.to_array([POS, HEAD, DEP])
-    for i, (p, head, dep) in enumerate(zip(pos, heads, deps)):
-        attrs[i, 0] = doc.vocab.strings[p]
-        attrs[i, 1] = head
-        attrs[i, 2] = doc.vocab.strings[dep]
-    doc.from_array([POS, HEAD, DEP], attrs)
-    if ents:
-        doc.ents = [
-            Span(doc, start, end, label=doc.vocab.strings[label])
-            for start, end, label in ents
-        ]
-    if tags:
-        for token in doc:
-            token.tag_ = tags[token.i]
-    return doc
+def get_random_doc(n_words):
+    vocab = Vocab()
+    # Make the words numbers, so that they're easy to track.
+    numbers = [str(i) for i in range(0, n_words)]
+    return Doc(vocab, words=numbers)
 
 
 def apply_transition_sequence(parser, doc, sequence):
@@ -86,8 +71,7 @@ def assert_docs_equal(doc1, doc2):
 
     assert [t.head.i for t in doc1] == [t.head.i for t in doc2]
     assert [t.dep for t in doc1] == [t.dep for t in doc2]
-    if doc1.is_parsed and doc2.is_parsed:
-        assert [s for s in doc1.sents] == [s for s in doc2.sents]
+    assert [t.is_sent_start for t in doc1] == [t.is_sent_start for t in doc2]
 
     assert [t.ent_type for t in doc1] == [t.ent_type for t in doc2]
     assert [t.ent_iob for t in doc1] == [t.ent_iob for t in doc2]

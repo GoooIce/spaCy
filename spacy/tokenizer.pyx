@@ -1,4 +1,4 @@
-# cython: embedsignature=True, profile=True
+# cython: embedsignature=True, profile=True, binding=True
 from __future__ import unicode_literals
 
 from cython.operator cimport dereference as deref
@@ -17,21 +17,25 @@ from .strings cimport hash_string
 from .lexeme cimport EMPTY_LEXEME
 
 from .attrs import intify_attrs
-from .symbols import ORTH
+from .symbols import ORTH, NORM
 from .errors import Errors, Warnings
 from . import util
+from .util import registry
 from .attrs import intify_attrs
 from .symbols import ORTH
+from .scorer import Scorer
+from .training import validate_examples
 
 
 cdef class Tokenizer:
     """Segment text, and create Doc objects with the discovered segment
     boundaries.
 
-    DOCS: https://spacy.io/api/tokenizer
+    DOCS: https://nightly.spacy.io/api/tokenizer
     """
     def __init__(self, Vocab vocab, rules=None, prefix_search=None,
-                 suffix_search=None, infix_finditer=None, token_match=None):
+                 suffix_search=None, infix_finditer=None, token_match=None,
+                 url_match=None):
         """Create a `Tokenizer`, to create `Doc` objects given unicode text.
 
         vocab (Vocab): A storage container for lexical types.
@@ -43,19 +47,20 @@ cdef class Tokenizer:
         `infix_finditer` (callable): A function matching the signature of
             `re.compile(string).finditer` to find infixes.
         token_match (callable): A boolean function matching strings to be
-            recognised as tokens.
-        RETURNS (Tokenizer): The newly constructed object.
+            recognized as tokens.
+        url_match (callable): A boolean function matching strings to be
+            recognized as tokens after considering prefixes and suffixes.
 
         EXAMPLE:
             >>> tokenizer = Tokenizer(nlp.vocab)
-            >>> tokenizer = English().Defaults.create_tokenizer(nlp)
 
-        DOCS: https://spacy.io/api/tokenizer#init
+        DOCS: https://nightly.spacy.io/api/tokenizer#init
         """
         self.mem = Pool()
         self._cache = PreshMap()
         self._specials = PreshMap()
         self.token_match = token_match
+        self.url_match = url_match
         self.prefix_search = prefix_search
         self.suffix_search = suffix_search
         self.infix_finditer = infix_finditer
@@ -75,6 +80,14 @@ cdef class Tokenizer:
             self._reload_special_cases()
             if self._property_init_count <= self._property_init_max:
                 self._property_init_count += 1
+
+    property url_match:
+        def __get__(self):
+            return self._url_match
+
+        def __set__(self, url_match):
+            self._url_match = url_match
+            self._flush_cache()
 
     property prefix_search:
         def __get__(self):
@@ -120,24 +133,21 @@ cdef class Tokenizer:
 
     def __reduce__(self):
         args = (self.vocab,
-                self._rules,
+                self.rules,
                 self.prefix_search,
                 self.suffix_search,
                 self.infix_finditer,
-                self.token_match)
+                self.token_match,
+                self.url_match)
         return (self.__class__, args, None, None)
-
-    cpdef Doc tokens_from_list(self, list strings):
-        warnings.warn(Warnings.W002, DeprecationWarning)
-        return Doc(self.vocab, words=strings)
 
     def __call__(self, unicode string):
         """Tokenize a string.
 
-        string (unicode): The string to tokenize.
+        string (str): The string to tokenize.
         RETURNS (Doc): A container for linguistic annotations.
 
-        DOCS: https://spacy.io/api/tokenizer#call
+        DOCS: https://nightly.spacy.io/api/tokenizer#call
         """
         doc = self._tokenize_affixes(string, True)
         self._apply_special_cases(doc)
@@ -147,7 +157,7 @@ cdef class Tokenizer:
     cdef Doc _tokenize_affixes(self, unicode string, bint with_special_cases):
         """Tokenize according to affix and token_match settings.
 
-        string (unicode): The string to tokenize.
+        string (str): The string to tokenize.
         RETURNS (Doc): A container for linguistic annotations.
         """
         if len(string) >= (2 ** 30):
@@ -159,8 +169,6 @@ cdef class Tokenizer:
         cdef int i = 0
         cdef int start = 0
         cdef int has_special = 0
-        cdef bint specials_hit = 0
-        cdef bint cache_hit = 0
         cdef bint in_ws = string[0].isspace()
         cdef unicode span
         # The task here is much like string.split, but not quite
@@ -176,13 +184,7 @@ cdef class Tokenizer:
                     # we don't have to create the slice when we hit the cache.
                     span = string[start:i]
                     key = hash_string(span)
-                    specials_hit = 0
-                    cache_hit = 0
-                    if with_special_cases:
-                        specials_hit = self._try_specials(key, doc, &has_special)
-                    if not specials_hit:
-                        cache_hit = self._try_cache(key, doc)
-                    if not specials_hit and not cache_hit:
+                    if not self._try_specials_and_cache(key, doc, &has_special, with_special_cases):
                         self._tokenize(doc, span, key, &has_special, with_special_cases)
                 if uc == ' ':
                     doc.c[doc.length - 1].spacy = True
@@ -194,18 +196,12 @@ cdef class Tokenizer:
         if start < i:
             span = string[start:]
             key = hash_string(span)
-            specials_hit = 0
-            cache_hit = 0
-            if with_special_cases:
-                specials_hit = self._try_specials(key, doc, &has_special)
-            if not specials_hit:
-                cache_hit = self._try_cache(key, doc)
-            if not specials_hit and not cache_hit:
+            if not self._try_specials_and_cache(key, doc, &has_special, with_special_cases):
                 self._tokenize(doc, span, key, &has_special, with_special_cases)
             doc.c[doc.length - 1].spacy = string[-1] == " " and not in_ws
         return doc
 
-    def pipe(self, texts, batch_size=1000, n_threads=-1, as_example=False):
+    def pipe(self, texts, batch_size=1000):
         """Tokenize a stream of texts.
 
         texts: A sequence of unicode texts.
@@ -213,10 +209,8 @@ cdef class Tokenizer:
         Defaults to 1000.
         YIELDS (Doc): A sequence of Doc objects, in order.
 
-        DOCS: https://spacy.io/api/tokenizer#pipe
+        DOCS: https://nightly.spacy.io/api/tokenizer#pipe
         """
-        if n_threads != -1:
-            warnings.warn(Warnings.W016, DeprecationWarning)
         for text in texts:
             yield self(text)
 
@@ -349,34 +343,41 @@ cdef class Tokenizer:
                     for j in range(cached.length):
                         tokens[i + offset + j] = cached.data.tokens[j]
                         tokens[i + offset + j].idx = orig_idx + idx_offset
-                        idx_offset += cached.data.tokens[j].lex.length + \
-                                1 if cached.data.tokens[j].spacy else 0
+                        idx_offset += cached.data.tokens[j].lex.length
+                        if cached.data.tokens[j].spacy:
+                            idx_offset += 1
                     tokens[i + offset + cached.length - 1].spacy = orig_final_spacy
                     i += span_end - span_start
                     offset += span[3]
         return offset
 
-    cdef int _try_cache(self, hash_t key, Doc tokens) except -1:
-        cached = <_Cached*>self._cache.get(key)
-        if cached == NULL:
-            return False
+    cdef int _try_specials_and_cache(self, hash_t key, Doc tokens, int* has_special, bint with_special_cases) except -1:
+        cdef bint specials_hit = 0
+        cdef bint cache_hit = 0
         cdef int i
-        if cached.is_lex:
-            for i in range(cached.length):
-                tokens.push_back(cached.data.lexemes[i], False)
-        else:
-            for i in range(cached.length):
-                tokens.push_back(&cached.data.tokens[i], False)
-        return True
-
-    cdef int _try_specials(self, hash_t key, Doc tokens, int* has_special) except -1:
-        cached = <_Cached*>self._specials.get(key)
-        if cached == NULL:
+        if with_special_cases:
+            cached = <_Cached*>self._specials.get(key)
+            if cached == NULL:
+                specials_hit = False
+            else:
+                for i in range(cached.length):
+                    tokens.push_back(&cached.data.tokens[i], False)
+                has_special[0] = 1
+                specials_hit = True
+        if not specials_hit:
+            cached = <_Cached*>self._cache.get(key)
+            if cached == NULL:
+                cache_hit = False
+            else:
+                if cached.is_lex:
+                    for i in range(cached.length):
+                        tokens.push_back(cached.data.lexemes[i], False)
+                else:
+                    for i in range(cached.length):
+                        tokens.push_back(&cached.data.tokens[i], False)
+                cache_hit = True
+        if not specials_hit and not cache_hit:
             return False
-        cdef int i
-        for i in range(cached.length):
-            tokens.push_back(&cached.data.tokens[i], False)
-        has_special[0] = 1
         return True
 
     cdef int _tokenize(self, Doc tokens, unicode span, hash_t orig_key, int* has_special, bint with_special_cases) except -1:
@@ -454,14 +455,11 @@ cdef class Tokenizer:
             for i in range(prefixes.size()):
                 tokens.push_back(prefixes[0][i], False)
         if string:
-            if with_special_cases:
-                specials_hit = self._try_specials(hash_string(string), tokens,
-                                                  has_special)
-            if not specials_hit:
-                cache_hit = self._try_cache(hash_string(string), tokens)
-            if specials_hit or cache_hit:
+            if self._try_specials_and_cache(hash_string(string), tokens, has_special, with_special_cases):
                 pass
-            elif self.token_match and self.token_match(string):
+            elif (self.token_match and self.token_match(string)) or \
+                    (self.url_match and \
+                    self.url_match(string)):
                 # We're always saying 'no' to spaces here -- the caller will
                 # fix up the outermost one, with reference to the original.
                 # See Issue #859
@@ -527,12 +525,12 @@ cdef class Tokenizer:
     def find_infix(self, unicode string):
         """Find internal split points of the string, such as hyphens.
 
-        string (unicode): The string to segment.
+        string (str): The string to segment.
         RETURNS (list): A list of `re.MatchObject` objects that have `.start()`
             and `.end()` methods, denoting the placement of internal segment
             separators, e.g. hyphens.
 
-        DOCS: https://spacy.io/api/tokenizer#find_infix
+        DOCS: https://nightly.spacy.io/api/tokenizer#find_infix
         """
         if self.infix_finditer is None:
             return 0
@@ -542,10 +540,10 @@ cdef class Tokenizer:
         """Find the length of a prefix that should be segmented from the
         string, or None if no prefix rules match.
 
-        string (unicode): The string to segment.
+        string (str): The string to segment.
         RETURNS (int): The length of the prefix if present, otherwise `None`.
 
-        DOCS: https://spacy.io/api/tokenizer#find_prefix
+        DOCS: https://nightly.spacy.io/api/tokenizer#find_prefix
         """
         if self.prefix_search is None:
             return 0
@@ -556,10 +554,10 @@ cdef class Tokenizer:
         """Find the length of a suffix that should be segmented from the
         string, or None if no suffix rules match.
 
-        string (unicode): The string to segment.
+        string (str): The string to segment.
         Returns (int): The length of the suffix if present, otherwise `None`.
 
-        DOCS: https://spacy.io/api/tokenizer#find_suffix
+        DOCS: https://nightly.spacy.io/api/tokenizer#find_suffix
         """
         if self.suffix_search is None:
             return 0
@@ -574,9 +572,11 @@ cdef class Tokenizer:
                 self.add_special_case(chunk, substrings)
 
     def _validate_special_case(self, chunk, substrings):
-        """Check whether the `ORTH` fields match the string.
+        """Check whether the `ORTH` fields match the string. Check that
+        additional features beyond `ORTH` and `NORM` are not set by the
+        exception.
 
-        string (unicode): The string to specially tokenize.
+        chunk (str): The string to specially tokenize.
         substrings (iterable): A sequence of dicts, where each dict describes
             a token and its attributes.
         """
@@ -584,16 +584,20 @@ cdef class Tokenizer:
         orth = "".join([spec[ORTH] for spec in attrs])
         if chunk != orth:
             raise ValueError(Errors.E997.format(chunk=chunk, orth=orth, token_attrs=substrings))
+        for substring in attrs:
+            for attr in substring:
+                if attr not in (ORTH, NORM):
+                    raise ValueError(Errors.E1005.format(attr=self.vocab.strings[attr], chunk=chunk))
 
     def add_special_case(self, unicode string, substrings):
         """Add a special-case tokenization rule.
 
-        string (unicode): The string to specially tokenize.
+        string (str): The string to specially tokenize.
         substrings (iterable): A sequence of dicts, where each dict describes
             a token and its attributes. The `ORTH` fields of the attributes
             must exactly match the string when they are concatenated.
 
-        DOCS: https://spacy.io/api/tokenizer#add_special_case
+        DOCS: https://nightly.spacy.io/api/tokenizer#add_special_case
         """
         self._validate_special_case(string, substrings)
         substrings = list(substrings)
@@ -629,15 +633,20 @@ cdef class Tokenizer:
         produced are identical to `nlp.tokenizer()` except for whitespace
         tokens.
 
-        string (unicode): The string to tokenize.
+        string (str): The string to tokenize.
         RETURNS (list): A list of (pattern_string, token_string) tuples
 
-        DOCS: https://spacy.io/api/tokenizer#explain
+        DOCS: https://nightly.spacy.io/api/tokenizer#explain
         """
         prefix_search = self.prefix_search
         suffix_search = self.suffix_search
         infix_finditer = self.infix_finditer
         token_match = self.token_match
+        if token_match is None:
+            token_match = re.compile("a^").match
+        url_match = self.url_match
+        if url_match is None:
+            url_match = re.compile("a^").match
         special_cases = {}
         for orth, special_tokens in self.rules.items():
             special_cases[orth] = [intify_attrs(special_token, strings_map=self.vocab.strings, _do_deprecated=True) for special_token in special_tokens]
@@ -646,6 +655,10 @@ cdef class Tokenizer:
             suffixes = []
             while substring:
                 while prefix_search(substring) or suffix_search(substring):
+                    if token_match(substring):
+                        tokens.append(("TOKEN_MATCH", substring))
+                        substring = ''
+                        break
                     if substring in special_cases:
                         tokens.extend(("SPECIAL-" + str(i + 1), self.vocab.strings[e[ORTH]]) for i, e in enumerate(special_cases[substring]))
                         substring = ''
@@ -666,11 +679,14 @@ cdef class Tokenizer:
                             break
                         suffixes.append(("SUFFIX", substring[split:]))
                         substring = substring[:split]
-                if substring in special_cases:
-                    tokens.extend(("SPECIAL-" + str(i + 1), self.vocab.strings[e[ORTH]]) for i, e in enumerate(special_cases[substring]))
-                    substring = ''
-                elif token_match(substring):
+                if token_match(substring):
                     tokens.append(("TOKEN_MATCH", substring))
+                    substring = ''
+                elif url_match(substring):
+                    tokens.append(("URL_MATCH", substring))
+                    substring = ''
+                elif substring in special_cases:
+                    tokens.extend(("SPECIAL-" + str(i + 1), self.vocab.strings[e[ORTH]]) for i, e in enumerate(special_cases[substring]))
                     substring = ''
                 elif list(infix_finditer(substring)):
                     infixes = infix_finditer(substring)
@@ -690,40 +706,46 @@ cdef class Tokenizer:
             tokens.extend(reversed(suffixes))
         return tokens
 
+    def score(self, examples, **kwargs):
+        validate_examples(examples, "Tokenizer.score")
+        return Scorer.score_tokenization(examples)
+
     def to_disk(self, path, **kwargs):
         """Save the current state to a directory.
 
-        path (unicode or Path): A path to a directory, which will be created if
+        path (str / Path): A path to a directory, which will be created if
             it doesn't exist.
         exclude (list): String names of serialization fields to exclude.
 
-        DOCS: https://spacy.io/api/tokenizer#to_disk
+        DOCS: https://nightly.spacy.io/api/tokenizer#to_disk
         """
+        path = util.ensure_path(path)
         with path.open("wb") as file_:
             file_.write(self.to_bytes(**kwargs))
 
-    def from_disk(self, path, **kwargs):
+    def from_disk(self, path, *, exclude=tuple()):
         """Loads state from a directory. Modifies the object in place and
         returns it.
 
-        path (unicode or Path): A path to a directory.
+        path (str / Path): A path to a directory.
         exclude (list): String names of serialization fields to exclude.
         RETURNS (Tokenizer): The modified `Tokenizer` object.
 
-        DOCS: https://spacy.io/api/tokenizer#from_disk
+        DOCS: https://nightly.spacy.io/api/tokenizer#from_disk
         """
+        path = util.ensure_path(path)
         with path.open("rb") as file_:
             bytes_data = file_.read()
-        self.from_bytes(bytes_data, **kwargs)
+        self.from_bytes(bytes_data, exclude=exclude)
         return self
 
-    def to_bytes(self, exclude=tuple(), **kwargs):
+    def to_bytes(self, *, exclude=tuple()):
         """Serialize the current state to a binary string.
 
         exclude (list): String names of serialization fields to exclude.
         RETURNS (bytes): The serialized form of the `Tokenizer` object.
 
-        DOCS: https://spacy.io/api/tokenizer#to_bytes
+        DOCS: https://nightly.spacy.io/api/tokenizer#to_bytes
         """
         serializers = {
             "vocab": lambda: self.vocab.to_bytes(),
@@ -731,19 +753,19 @@ cdef class Tokenizer:
             "suffix_search": lambda: _get_regex_pattern(self.suffix_search),
             "infix_finditer": lambda: _get_regex_pattern(self.infix_finditer),
             "token_match": lambda: _get_regex_pattern(self.token_match),
+            "url_match": lambda: _get_regex_pattern(self.url_match),
             "exceptions": lambda: dict(sorted(self._rules.items()))
         }
-        exclude = util.get_serialization_exclude(serializers, exclude, kwargs)
         return util.to_bytes(serializers, exclude)
 
-    def from_bytes(self, bytes_data, exclude=tuple(), **kwargs):
+    def from_bytes(self, bytes_data, *, exclude=tuple()):
         """Load state from a binary string.
 
         bytes_data (bytes): The data to load from.
         exclude (list): String names of serialization fields to exclude.
         RETURNS (Tokenizer): The `Tokenizer` object.
 
-        DOCS: https://spacy.io/api/tokenizer#from_bytes
+        DOCS: https://nightly.spacy.io/api/tokenizer#from_bytes
         """
         data = {}
         deserializers = {
@@ -752,25 +774,26 @@ cdef class Tokenizer:
             "suffix_search": lambda b: data.setdefault("suffix_search", b),
             "infix_finditer": lambda b: data.setdefault("infix_finditer", b),
             "token_match": lambda b: data.setdefault("token_match", b),
+            "url_match": lambda b: data.setdefault("url_match", b),
             "exceptions": lambda b: data.setdefault("rules", b)
         }
-        exclude = util.get_serialization_exclude(deserializers, exclude, kwargs)
         msg = util.from_bytes(bytes_data, deserializers, exclude)
-        if data.get("prefix_search"):
+        if "prefix_search" in data and isinstance(data["prefix_search"], str):
             self.prefix_search = re.compile(data["prefix_search"]).search
-        if data.get("suffix_search"):
+        if "suffix_search" in data and isinstance(data["suffix_search"], str):
             self.suffix_search = re.compile(data["suffix_search"]).search
-        if data.get("infix_finditer"):
+        if "infix_finditer" in data and isinstance(data["infix_finditer"], str):
             self.infix_finditer = re.compile(data["infix_finditer"]).finditer
-        if data.get("token_match"):
+        if "token_match" in data and isinstance(data["token_match"], str):
             self.token_match = re.compile(data["token_match"]).match
-        if data.get("rules"):
+        if "url_match" in data and isinstance(data["url_match"], str):
+            self.url_match = re.compile(data["url_match"]).match
+        if "rules" in data and isinstance(data["rules"], dict):
             # make sure to hard reset the cache to remove data from the default exceptions
             self._rules = {}
             self._flush_cache()
             self._flush_specials()
-            self._load_special_cases(data.get("rules", {}))
-
+            self._load_special_cases(data["rules"])
         return self
 
 

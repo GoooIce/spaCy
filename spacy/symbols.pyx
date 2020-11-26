@@ -13,7 +13,7 @@ IDS = {
     "LIKE_NUM": LIKE_NUM,
     "LIKE_EMAIL": LIKE_EMAIL,
     "IS_STOP": IS_STOP,
-    "IS_OOV": IS_OOV,
+    "IS_OOV_DEPRECATED": IS_OOV_DEPRECATED,
     "IS_BRACKET": IS_BRACKET,
     "IS_QUOTE": IS_QUOTE,
     "IS_LEFT_PUNCT": IS_LEFT_PUNCT,
@@ -89,6 +89,7 @@ IDS = {
     "SPACY": SPACY,
     "PROB": PROB,
     "LANG": LANG,
+    "IDX": IDX,
 
     "ADJ": ADJ,
     "ADP": ADP,
@@ -464,6 +465,7 @@ IDS = {
     "acl": acl,
     "LAW": LAW,
     "MORPH": MORPH,
+    "_": _,
 }
 
 
@@ -471,7 +473,6 @@ def sort_nums(x):
     return x[1]
 
 
-PRON_LEMMA = "-PRON-"
 NAMES = [it[0] for it in sorted(IDS.items(), key=sort_nums)]
 # Unfortunate hack here, to work around problem with long cpdef enum
 # (which is generating an enormous amount of C++ in Cython 0.24+)

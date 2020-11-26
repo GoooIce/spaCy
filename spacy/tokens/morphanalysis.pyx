@@ -1,6 +1,8 @@
 from libc.string cimport memset
 cimport numpy as np
 
+from ..errors import Errors
+from ..morphology import Morphology
 from ..vocab cimport Vocab
 from ..typedefs cimport hash_t, attr_t
 from ..morphology cimport list_features, check_feature, get_by_field
@@ -45,26 +47,23 @@ cdef class MorphAnalysis:
         """The number of features in the analysis."""
         return self.c.length
 
-    def __str__(self):
-        return self.to_json()
-
-    def __repr__(self):
-        return self.to_json()
-
     def __hash__(self):
         return self.key
 
     def __eq__(self, other):
+        if isinstance(other, str):
+            raise ValueError(Errors.E977)
         return self.key == other.key
 
     def __ne__(self, other):
         return self.key != other.key
 
     def get(self, field):
-        """Retrieve a feature by field."""
+        """Retrieve feature values by field."""
         cdef attr_t field_id = self.vocab.strings.as_int(field)
         cdef np.ndarray results = get_by_field(&self.c, field_id)
-        return [self.vocab.strings[result] for result in results]
+        features = [self.vocab.strings[result] for result in results]
+        return [f.split(Morphology.FIELD_SEP)[1] for f in features]
 
     def to_json(self):
         """Produce a json serializable representation as a UD FEATS-style
@@ -79,3 +78,10 @@ cdef class MorphAnalysis:
         """Produce a dict representation.
         """
         return self.vocab.morphology.feats_to_dict(self.to_json())
+
+    def __str__(self):
+        return self.to_json()
+
+    def __repr__(self):
+        return self.to_json()
+

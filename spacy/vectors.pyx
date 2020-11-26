@@ -18,7 +18,7 @@ def unpickle_vectors(bytes_data):
     return Vectors().from_bytes(bytes_data)
 
 
-class GlobalRegistry(object):
+class GlobalRegistry:
     """Global store of vectors, to avoid repeatedly loading the data."""
     data = {}
 
@@ -44,7 +44,7 @@ cdef class Vectors:
     the table need to be assigned - so len(list(vectors.keys())) may be
     greater or smaller than vectors.shape[0].
 
-    DOCS: https://spacy.io/api/vectors
+    DOCS: https://nightly.spacy.io/api/vectors
     """
     cdef public object name
     cdef public object data
@@ -57,10 +57,9 @@ cdef class Vectors:
         shape (tuple): Size of the table, as (# entries, # columns)
         data (numpy.ndarray): The vector data.
         keys (iterable): A sequence of keys, aligned with the data.
-        name (unicode): A name to identify the vectors table.
-        RETURNS (Vectors): The newly created object.
+        name (str): A name to identify the vectors table.
 
-        DOCS: https://spacy.io/api/vectors#init
+        DOCS: https://nightly.spacy.io/api/vectors#init
         """
         self.name = name
         if data is None:
@@ -84,7 +83,7 @@ cdef class Vectors:
 
         RETURNS (tuple): A `(rows, dims)` pair.
 
-        DOCS: https://spacy.io/api/vectors#shape
+        DOCS: https://nightly.spacy.io/api/vectors#shape
         """
         return self.data.shape
 
@@ -94,7 +93,7 @@ cdef class Vectors:
 
         RETURNS (int): The vector size.
 
-        DOCS: https://spacy.io/api/vectors#size
+        DOCS: https://nightly.spacy.io/api/vectors#size
         """
         return self.data.shape[0] * self.data.shape[1]
 
@@ -104,7 +103,7 @@ cdef class Vectors:
 
         RETURNS (bool): `True` if no slots are available for new keys.
 
-        DOCS: https://spacy.io/api/vectors#is_full
+        DOCS: https://nightly.spacy.io/api/vectors#is_full
         """
         return self._unset.size() == 0
 
@@ -115,7 +114,7 @@ cdef class Vectors:
 
         RETURNS (int): The number of keys in the table.
 
-        DOCS: https://spacy.io/api/vectors#n_keys
+        DOCS: https://nightly.spacy.io/api/vectors#n_keys
         """
         return len(self.key2row)
 
@@ -128,7 +127,7 @@ cdef class Vectors:
         key (int): The key to get the vector for.
         RETURNS (ndarray): The vector for the key.
 
-        DOCS: https://spacy.io/api/vectors#getitem
+        DOCS: https://nightly.spacy.io/api/vectors#getitem
         """
         i = self.key2row[key]
         if i is None:
@@ -142,7 +141,7 @@ cdef class Vectors:
         key (int): The key to set the vector for.
         vector (ndarray): The vector to set.
 
-        DOCS: https://spacy.io/api/vectors#setitem
+        DOCS: https://nightly.spacy.io/api/vectors#setitem
         """
         i = self.key2row[key]
         self.data[i] = vector
@@ -154,7 +153,7 @@ cdef class Vectors:
 
         YIELDS (int): A key in the table.
 
-        DOCS: https://spacy.io/api/vectors#iter
+        DOCS: https://nightly.spacy.io/api/vectors#iter
         """
         yield from self.key2row
 
@@ -163,7 +162,7 @@ cdef class Vectors:
 
         RETURNS (int): The number of vectors in the data.
 
-        DOCS: https://spacy.io/api/vectors#len
+        DOCS: https://nightly.spacy.io/api/vectors#len
         """
         return self.data.shape[0]
 
@@ -173,7 +172,7 @@ cdef class Vectors:
         key (int): The key to check.
         RETURNS (bool): Whether the key has a vector entry.
 
-        DOCS: https://spacy.io/api/vectors#contains
+        DOCS: https://nightly.spacy.io/api/vectors#contains
         """
         return key in self.key2row
 
@@ -190,15 +189,22 @@ cdef class Vectors:
         inplace (bool): Reallocate the memory.
         RETURNS (list): The removed items as a list of `(key, row)` tuples.
 
-        DOCS: https://spacy.io/api/vectors#resize
+        DOCS: https://nightly.spacy.io/api/vectors#resize
         """
+        xp = get_array_module(self.data)
         if inplace:
-            self.data.resize(shape, refcheck=False)
+            if shape[1] != self.data.shape[1]:
+                raise ValueError(Errors.E193.format(new_dim=shape[1], curr_dim=self.data.shape[1]))
+            if xp == numpy:
+                self.data.resize(shape, refcheck=False)
+            else:
+                raise ValueError(Errors.E192)
         else:
-            xp = get_array_module(self.data)
-            self.data = xp.resize(self.data, shape)
-        filled = {row for row in self.key2row.values()}
-        self._unset = cppset[int]({row for row in range(shape[0]) if row not in filled})
+            resized_array = xp.zeros(shape, dtype=self.data.dtype)
+            copy_shape = (min(shape[0], self.data.shape[0]), min(shape[1], self.data.shape[1]))
+            resized_array[:copy_shape[0], :copy_shape[1]] = self.data[:copy_shape[0], :copy_shape[1]]
+            self.data = resized_array
+        self._sync_unset()
         removed_items = []
         for key, row in list(self.key2row.items()):
             if row >= shape[0]:
@@ -218,7 +224,7 @@ cdef class Vectors:
 
         YIELDS (ndarray): A vector in the table.
 
-        DOCS: https://spacy.io/api/vectors#values
+        DOCS: https://nightly.spacy.io/api/vectors#values
         """
         for row, vector in enumerate(range(self.data.shape[0])):
             if not self._unset.count(row):
@@ -229,7 +235,7 @@ cdef class Vectors:
 
         YIELDS (tuple): A key/vector pair.
 
-        DOCS: https://spacy.io/api/vectors#items
+        DOCS: https://nightly.spacy.io/api/vectors#items
         """
         for key, row in self.key2row.items():
             yield key, self.data[row]
@@ -237,7 +243,7 @@ cdef class Vectors:
     def find(self, *, key=None, keys=None, row=None, rows=None):
         """Look up one or more keys by row, or vice versa.
 
-        key (unicode / int): Find the row that the given key points to.
+        key (str / int): Find the row that the given key points to.
             Returns int, -1 if missing.
         keys (iterable): Find rows that the keys point to.
             Returns ndarray.
@@ -275,7 +281,7 @@ cdef class Vectors:
         row (int / None): The row number of a vector to map the key to.
         RETURNS (int): The row the vector was added to.
 
-        DOCS: https://spacy.io/api/vectors#add
+        DOCS: https://nightly.spacy.io/api/vectors#add
         """
         # use int for all keys and rows in key2row for more efficient access
         # and serialization
@@ -289,11 +295,14 @@ cdef class Vectors:
                 raise ValueError(Errors.E060.format(rows=self.data.shape[0],
                                                     cols=self.data.shape[1]))
             row = deref(self._unset.begin())
-        self.key2row[key] = row
+        if row < self.data.shape[0]:
+            self.key2row[key] = row
+        else:
+            raise ValueError(Errors.E197.format(row=row, key=key))
         if vector is not None:
             self.data[row] = vector
-            if self._unset.count(row):
-                self._unset.erase(self._unset.find(row))
+        if self._unset.count(row):
+            self._unset.erase(self._unset.find(row))
         return row
 
     def most_similar(self, queries, *, batch_size=1024, n=1, sort=True):
@@ -312,11 +321,14 @@ cdef class Vectors:
         RETURNS (tuple): The most similar entries as a `(keys, best_rows, scores)`
             tuple.
         """
+        filled = sorted(list({row for row in self.key2row.values()}))
+        if len(filled) < n:
+            raise ValueError(Errors.E198.format(n=n, n_rows=len(filled)))
         xp = get_array_module(self.data)
 
-        norms = xp.linalg.norm(self.data, axis=1, keepdims=True)
+        norms = xp.linalg.norm(self.data[filled], axis=1, keepdims=True)
         norms[norms == 0] = 1
-        vectors = self.data / norms
+        vectors = self.data[filled] / norms
 
         best_rows = xp.zeros((queries.shape[0], n), dtype='i')
         scores = xp.zeros((queries.shape[0], n), dtype='f')
@@ -338,7 +350,8 @@ cdef class Vectors:
                 scores[i:i+batch_size] = scores[sorted_index]
                 best_rows[i:i+batch_size] = best_rows[sorted_index]
 
-        xp = get_array_module(self.data)
+        for i, j in numpy.ndindex(best_rows.shape):
+            best_rows[i, j] = filled[best_rows[i, j]]
         # Round values really close to 1 or -1
         scores = xp.around(scores, decimals=4, out=scores)
         # Account for numerical error we want to return in range -1, 1
@@ -349,59 +362,29 @@ cdef class Vectors:
                     for i in range(len(queries)) ], dtype="uint64")
         return (keys, best_rows, scores)
 
-    def from_glove(self, path):
-        """Load GloVe vectors from a directory. Assumes binary format,
-        that the vocab is in a vocab.txt, and that vectors are named
-        vectors.{size}.[fd].bin, e.g. vectors.128.f.bin for 128d float32
-        vectors, vectors.300.d.bin for 300d float64 (double) vectors, etc.
-        By default GloVe outputs 64-bit vectors.
-
-        path (unicode / Path): The path to load the GloVe vectors from.
-        RETURNS: A `StringStore` object, holding the key-to-string mapping.
-
-        DOCS: https://spacy.io/api/vectors#from_glove
-        """
-        path = util.ensure_path(path)
-        width = None
-        for name in path.iterdir():
-            if name.parts[-1].startswith("vectors"):
-                _, dims, dtype, _2 = name.parts[-1].split('.')
-                width = int(dims)
-                break
-        else:
-            raise IOError(Errors.E061.format(filename=path))
-        bin_loc = path / f"vectors.{dims}.{dtype}.bin"
-        xp = get_array_module(self.data)
-        self.data = None
-        with bin_loc.open("rb") as file_:
-            self.data = xp.fromfile(file_, dtype=dtype)
-            if dtype != "float32":
-                self.data = xp.ascontiguousarray(self.data, dtype="float32")
-        if self.data.ndim == 1:
-            self.data = self.data.reshape((self.data.size//width, width))
-        n = 0
-        strings = StringStore()
-        with (path / "vocab.txt").open("r") as file_:
-            for i, line in enumerate(file_):
-                key = strings.add(line.strip())
-                self.add(key, row=i)
-        return strings
-
     def to_disk(self, path, **kwargs):
         """Save the current state to a directory.
 
-        path (unicode / Path): A path to a directory, which will be created if
+        path (str / Path): A path to a directory, which will be created if
             it doesn't exists.
 
-        DOCS: https://spacy.io/api/vectors#to_disk
+        DOCS: https://nightly.spacy.io/api/vectors#to_disk
         """
         xp = get_array_module(self.data)
         if xp is numpy:
             save_array = lambda arr, file_: xp.save(file_, arr, allow_pickle=False)
         else:
             save_array = lambda arr, file_: xp.save(file_, arr)
+
+        def save_vectors(path):
+            # the source of numpy.save indicates that the file object is closed after use.
+            # but it seems that somehow this does not happen, as ResourceWarnings are raised here.
+            # in order to not rely on this, wrap in context manager.
+            with path.open("wb") as _file:
+                save_array(self.data, _file)
+
         serializers = {
-            "vectors": lambda p: save_array(self.data, p.open("wb")),
+            "vectors": lambda p: save_vectors(p),
             "key2row": lambda p: srsly.write_msgpack(p, self.key2row)
         }
         return util.to_disk(path, serializers, [])
@@ -410,10 +393,10 @@ cdef class Vectors:
         """Loads state from a directory. Modifies the object in place and
         returns it.
 
-        path (unicode / Path): Directory path, string or Path-like object.
+        path (str / Path): Directory path, string or Path-like object.
         RETURNS (Vectors): The modified object.
 
-        DOCS: https://spacy.io/api/vectors#from_disk
+        DOCS: https://nightly.spacy.io/api/vectors#from_disk
         """
         def load_key2row(path):
             if path.exists():
@@ -434,11 +417,13 @@ cdef class Vectors:
                 self.data = ops.xp.load(str(path))
 
         serializers = {
-            "key2row": load_key2row,
-            "keys": load_keys,
             "vectors": load_vectors,
+            "keys": load_keys,
+            "key2row": load_key2row,
         }
+
         util.from_disk(path, serializers, [])
+        self._sync_unset()
         return self
 
     def to_bytes(self, **kwargs):
@@ -447,7 +432,7 @@ cdef class Vectors:
         exclude (list): String names of serialization fields to exclude.
         RETURNS (bytes): The serialized form of the `Vectors` object.
 
-        DOCS: https://spacy.io/api/vectors#to_bytes
+        DOCS: https://nightly.spacy.io/api/vectors#to_bytes
         """
         def serialize_weights():
             if hasattr(self.data, "to_bytes"):
@@ -468,7 +453,7 @@ cdef class Vectors:
         exclude (list): String names of serialization fields to exclude.
         RETURNS (Vectors): The `Vectors` object.
 
-        DOCS: https://spacy.io/api/vectors#from_bytes
+        DOCS: https://nightly.spacy.io/api/vectors#from_bytes
         """
         def deserialize_weights(b):
             if hasattr(self.data, "from_bytes"):
@@ -481,4 +466,9 @@ cdef class Vectors:
             "vectors": deserialize_weights
         }
         util.from_bytes(data, deserializers, [])
+        self._sync_unset()
         return self
+
+    def _sync_unset(self):
+        filled = {row for row in self.key2row.values()}
+        self._unset = cppset[int]({row for row in range(self.data.shape[0]) if row not in filled})

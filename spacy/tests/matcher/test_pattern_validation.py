@@ -31,6 +31,8 @@ TEST_PATTERNS = [
     ([{"NORM": "a"}, {"POS": {"IN": ["NOUN"]}}], 0, 0),
     ([{"_": {"foo": {"NOT_IN": ["bar", "baz"]}, "a": 5, "b": {">": 10}}}], 0, 0),
     ([{"orth": "foo"}], 0, 0),  # prev: xfail
+    ([{"IS_SENT_START": True}], 0, 0),
+    ([{"SENT_START": True}], 0, 0),
 ]
 
 
@@ -57,3 +59,12 @@ def test_minimal_pattern_validation(en_vocab, pattern, n_errors, n_min_errors):
             matcher.add("TEST", [pattern])
     elif n_errors == 0:
         matcher.add("TEST", [pattern])
+
+
+def test_pattern_errors(en_vocab):
+    matcher = Matcher(en_vocab)
+    # normalize "regex" to upper like "text"
+    matcher.add("TEST1", [[{"text": {"regex": "regex"}}]])
+    # error if subpattern attribute isn't recognized and processed
+    with pytest.raises(MatchPatternError):
+        matcher.add("TEST2", [[{"TEXT": {"XX": "xx"}}]])
